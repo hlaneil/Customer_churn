@@ -1,0 +1,271 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+library(readxl)
+library(lattice)
+library(ggplot2)
+library(gtools)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(caret)
+```
+
+#Data Preparation 
+```{r}
+# read the data and take a look at it
+cuschurn<-read.csv("WA_Fn-UseC_-Telco-Customer-Churn.csv",stringsAsFactors= T)
+sum(is.na(cuschurn))
+summary(cuschurn)
+```
+
+There are 11 NA values in Total Charges.
+
+We performed the following steps to clean and prepare the data for further analysis:
+
+1. There are 11 NA values in Total Charges because the tenure of the 11 customers is 0 (less then 1 month) and they all haven't churn yet. We believe because the tenure is 0, these customers should be excluded from our study in prevent of potential bias. Thus, we chose to omit the 11 NA values instead of plug in zero values.
+
+2. Convert Senior Citizen column from int to factor.
+
+3. Convert CustomerID column to row names of the dataset.
+
+```{r}
+cuschurn<-na.omit(cuschurn)
+cuschurn$SeniorCitizen<-as.factor(cuschurn$SeniorCitizen)
+rownames(cuschurn) <- cuschurn[,1] #Assigning row names from 1st column 
+cuschurn[,1] <- NULL #Removing the first column
+summary(cuschurn)
+```
+
+Now that the data is cleaned, let's first take a look at the impacts of tenure and Monthly Charges on cuschurn.
+
+```{r}
+cuschurn%>%
+  ggplot(aes(x=tenure,y=MonthlyCharges, col=Churn))+
+  geom_point(shape=1)
+```
+
+In general, the longer the tenure is, the less likely the customer will churn; the lower the monthly charge, the less likely the customer will churn.
+
+Next step, let's plot customers churn rate grouped by each variable:
+
+```{r}
+cuschurn%>%
+  ggplot(aes(x=gender, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=SeniorCitizen, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=Partner, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=PhoneService, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=MultipleLines, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=InternetService, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=OnlineSecurity, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=OnlineBackup, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=DeviceProtection, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=TechSupport, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=StreamingTV, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=StreamingMovies, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=Contract, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=PaperlessBilling, fill=Churn))+
+  geom_bar()
+cuschurn%>%
+  ggplot(aes(x=PaymentMethod, fill=Churn))+
+  geom_bar()
+```
+
+Then, we re-assigned Churn column values for the convenience of further calculations: 1 for Yes, 0 for No.
+
+We calculated the churn rate grouped by each variable (column)
+
+```{r}
+cuschurn$Churn = ifelse(cuschurn$Churn == "Yes", 1, 0)
+
+cuschurn$tenure<- quantcut(cuschurn$tenure, q=10)
+cuschurn$MonthlyCharges<- quantcut(cuschurn$MonthlyCharges, q=10)
+cuschurn$TotalCharges<- quantcut(cuschurn$TotalCharges, q=10)
+
+groups <- c(quo(gender), quo(SeniorCitizen), quo(Partner), quo(PhoneService), quo(MultipleLines), quo(InternetService), quo(OnlineSecurity), quo(OnlineBackup), quo(DeviceProtection), quo(TechSupport), quo(StreamingTV), quo(StreamingMovies), quo(Contract), quo(PaperlessBilling), quo(PaymentMethod),quo(tenure), quo(MonthlyCharges), quo(TotalCharges) )  # Create a quoture
+
+for (i in seq_along(groups)) {
+  cuschurn%>% 
+    group_by(!!groups[[i]]) %>% # Unquote with !!
+    summarise(churn_rate = round(mean(Churn),3))%>%
+    mutate(Diff = churn_rate - lag(churn_rate))%>%
+    print()
+}
+```
+
+From the stats above, we conclude:
+
+
+1. Gender does not have a direct impact on churn rate, but whether or not the customer is a Senior Citizen and he/she has a partner have impact on the customer's churn rate.
+
+2. Phone Service and Multiple Lines do not seem to have visible impact on customer churn rate. We are excluding the two factors from further model development.
+
+3. Our expectation for tenure is correct, the longer customer's tenure is, the less likely he/she will churn. For Monthly Charges, there is a gap. Customer's churn rate is very low when charged with < 25. When charged between 25 and 70, the churn rate is around 20%-25%. When charged between 70 and 100, the churn rate is the highest - around 40%.
+
+4. Online Security, Device Protection and Tech Support variables have very similar churn rate distributions; Streaming TV or Streaming Movies also have very similar churn rate distributions, let's examine how similar those variables are to each other, to see if we can include either one.
+
+```{r}
+sum(cuschurn$OnlineSecurity == cuschurn$TechSupport) / nrow(cuschurn)
+sum(cuschurn$DeviceProtection == cuschurn$TechSupport) / nrow(cuschurn)
+sum(cuschurn$OnlineSecurity == cuschurn$DeviceProtection) / nrow(cuschurn)
+sum(cuschurn$StreamingTV == cuschurn$StreamingMovies) / nrow(cuschurn)
+```
+They are not very similar. We will include them all.
+
+#Modeling---Classification Tree
+This step is to split the training data set and testing data. We chose 80/20 split
+```{r}
+set.seed(1)
+index<-sample(nrow(cuschurn),nrow(cuschurn)*0.2)  # 80-20 train-validation split
+test<-cuschurn%>% 
+  filter(row_number() %in% index)%>%
+  select("Churn","gender","SeniorCitizen","Partner","InternetService","OnlineSecurity","OnlineBackup","DeviceProtection","TechSupport","StreamingTV","StreamingMovies","Contract","PaperlessBilling","PaymentMethod")
+train<-cuschurn[-index,c("Churn","gender","SeniorCitizen","Partner","InternetService","OnlineSecurity","OnlineBackup","DeviceProtection","TechSupport","StreamingTV","StreamingMovies","Contract","PaperlessBilling","PaymentMethod")]
+```
+
+#Classification Tree model with training dataset
+We first construct the full classification tree with cp = 0. 
+
+The plot below is to visually show the tree.
+
+```{r}
+ct_train_full_tree<-rpart(Churn~gender+SeniorCitizen+Partner+InternetService+OnlineSecurity+OnlineBackup+DeviceProtection+TechSupport+StreamingTV+StreamingMovies+Contract+PaperlessBilling+PaymentMethod,
+                             data=train, 
+                             method="class", 
+                             control=rpart.control(cp=0))
+rpart.plot(ct_train_full_tree)
+```
+
+The full tree is obviously too complex and very likely to have overfiting problem. 
+
+
+Let's take a look at the tree's detailed data to determine how to prune the tree.
+
+```{r}
+printcp(ct_train_full_tree)
+plotcp(ct_train_full_tree)
+```
+
+The tree's mean cross-validation error (shown as xerror) first went down, touched 0.823, and then went up. The minimum cross-validation error appears at cp = 0.002236 with 15 splits (16 end leaves).
+
+Here are the pruned tree' plots:
+
+```{r}
+min_xerror<-ct_train_full_tree$cptable[which.min(ct_train_full_tree$cptable[,"xerror"]),]
+
+# prune tree with the two cp value
+min_xerror_tree<-prune(ct_train_full_tree, cp=min_xerror[1])
+
+# plot the two trees
+rpart.plot(min_xerror_tree)
+```
+
+Let's use the prune trees to classify churn or not, then examine if the prediction error rate on training data is the same as testing data.
+
+```{r}
+# use the two trees to predict training and testing data set
+train$min_xerror_prob<-predict(min_xerror_tree,train)[,2]
+test$min_xerror_prob<-predict(min_xerror_tree,test)[,2]
+
+# create cut off point from 0.3 to 0.6, step = 0.01
+x = seq(from = 0.3, to = 0.7, by = 0.01)
+train_error = c()
+test_error = c()
+
+# use for loop to calculate error rates at each cut off point
+for (i in x)
+{
+  train$min_xerror_prob_class=ifelse(train$min_xerror_prob> i,1,0)
+  test$min_xerror_prob_class=ifelse(test$min_xerror_prob> i,1,0)
+  min_xerror_train_error = round(sum(train$min_xerror_prob_class!=train$Churn) / nrow(train), 4)
+  min_xerror_test_error = round(sum(test$min_xerror_prob_class!=test$Churn) / nrow(test), 4)
+  train_error = c(train_error,min_xerror_train_error)
+  test_error = c(test_error,min_xerror_test_error)
+}
+
+# plot error rates at each cut off point
+train_error <- data.frame(x, train_error)
+test_error <- data.frame(x, test_error)
+
+ggplot() + 
+  geom_line(data = train_error, aes(x = x, y = train_error), color = "pink", size = 1) +
+  geom_line(data = test_error, aes(x = x, y = test_error), color = "purple", size = 1) +
+  xlab('cut off point') +
+  ylab('error rate')
+```
+
+The plot below shows the result. Pink line shows training error rate, purple line shows testing error rate. We can see from the plot:
+
+1. The two error rates are almost the same – maximum difference is less than 1%. No over-fitting problem.
+
+2. As the cut-off point increases, the model's error rate first decrease, then increase.
+
+3. From cut-off point 0.4 to 0.6, both training and testing error rates mainly remain the same.
+
+4. From cut-off point 0.3 to 0.35 and 0.6 to 0.7, there is sharp increases in both training and testing error rates.
+
+Because we are a telecom company trying to find solutions to lower customer churn rate, we must correctly identify as many churn customers as possible, even though false positive will rise. It’s more important not to miss a churning customer than to have a false positive because it is more costly for the company. 
+
+Thus, we choose the lowest cut-off point to classify as many possibly churn customers as possible at the same overall accuracy level. We choose 0.4 as our cut-off point. 
+
+Now let's take a look at the confusion matrix of the tree's classification at cut-off point 0.4.
+
+```{r}
+train$min_xerror_prob_class=ifelse(train$min_xerror_prob>0.4,1,0)
+test$min_xerror_prob_class=ifelse(test$min_xerror_prob>0.4,1,0)
+test$min_xerror_prob_class = as.factor(test$min_xerror_prob_class)
+test$Churn = as.factor(test$Churn)
+confusionMatrix(test$min_xerror_prob_class, test$Churn)  # confusion table on test data
+```
+
+Our model’s accuracy is 78.59%. Sensitivity is 85.21%, Specificity (1 – false negative rate) is 60.58%, Prevalence is 73.12%. 
+
+Given our goal is to minimize false negative rate (maximize Specificity) while keep Sensitivity and Prevalence high, the model’s classification performance on the testing data set met our expectation.
+
+Finally, we plot the ROC to see the trade-off between the model’s Sensitivity and Specificity at different thresholds and the corresponding AUC:
+
+```{r}
+min_xerror_roc<-roc(test$Churn,test$min_xerror_prob,auc=TRUE)
+plot(min_xerror_roc,print.auc=TRUE,col="red")
+```
+
+To conclude, we chose the tree that minimizes cross validation error as our final classification tree model. 
+
+```{r}
+rpart.plot(min_xerror_tree)
+```
